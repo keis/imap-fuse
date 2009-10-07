@@ -103,7 +103,7 @@ class ImapHelper(object):
 			dirs = [parse(dir) for dir in dirs]
 			d = {}
 			for (opts, sep, name) in dirs:
-				parts = name.split(sep, 1)
+				parts = name.rsplit(sep, 1)
 				path = '/'.join(parts)
 				tmp = self._dirs.get(path, {})
 				tmp.update(dict(zip(('opts', 'sep', 'name'), (opts, sep, parts[-1]))))
