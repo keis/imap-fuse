@@ -86,7 +86,7 @@ class ImapHelper(object):
 
 		## seconds before data is considered old
 		self.list_ctime = 5 * 60
-		self.select_ctime = 60 # is this really needed? msg_count is never used.
+		self.select_ctime = 60
 		self.search_ctime = 60
 		self.meta_ctime = 24 * 60 * 60
 		self.data_ctime = 7 * 24 * 60 * 60
@@ -99,7 +99,7 @@ class ImapHelper(object):
 		try:
 			return self._dirs[path]
 		except KeyError:
-			self._list_dirs()
+			self._select_dir(path)
 			return self._dirs.get(path, None)
 
 	def _list_dirs(self, forced=False):
@@ -285,18 +285,13 @@ class ImapHelper(object):
 		return True
 
 	def _select_dir(self, path, forced=False):
-		# TODO, consider blindly issuing select commands if not in _dirs
-		self._list_dirs()
-		try:
-			dir = self._dirs[path]
-		except KeyError:
-			return False
-
-		if forced or time.time() - self.select_ctime > dir.get('last_select', 0):
+		last_select = self._dirs.get(path, {}).get('last_select', 0)
+		if forced or time.time() - self.select_ctime > last_select:
 			print 'SELECT %s' % path
 			status,(msgc,) = self.imap.select(path)
 			if status != 'OK':
 				return False
+			dir = get(self._dirs, path, {'name': path.rsplit('/',1)[-1]})
 			dir['last_select'] = time.time()
 			dir['msg_count'] = int(msgc)
 			self._selected = path
@@ -362,14 +357,14 @@ class ImapFS(Fuse,ImapHelper):
 	def rmdir(self, path):
 		path = path[1:]
 
-		# make sure the directory is empty.
-		self._list_dirs()
-		if not self._list_messages(path, fetch_meta=False):
-			print "Failed to list messages in %s" % (path, )
-			return -errno.ENOENT
+		if not self._select_dir(path):
+			return -errno.ENOTDIR
 		dir = self._dirs[path]
-		if len(dir['msg_uids']):
-			return -errno.ENOENT
+
+		# make sure the directory is empty.
+		if dir['msg_count'] > 0:
+			print "%s not empty" % path
+			return -errno.ENOTEMPTY
 
 		if not self._delete_dir(path):
 			return -errno.ENOENT
