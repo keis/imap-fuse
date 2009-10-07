@@ -95,6 +95,13 @@ class ImapHelper(object):
 		self.imap = imaplib.IMAP4_SSL(server)
 		self.imap.login(*auth)
 
+	def get_dir(self, path):
+		try:
+			return self._dirs[path]
+		except KeyError:
+			self._list_dirs()
+			return self._dirs.get(path, None)
+
 	def _list_dirs(self, forced=False):
 		if forced or time.time() - self.list_ctime > self._last_list:
 			print 'LISTING DIRECTORIES'
@@ -127,6 +134,65 @@ class ImapHelper(object):
 		self._last_list = 0
 		return True
 
+	def _rename_dir(self, old_path, new_path):
+		status, r = self.imap.rename(old_path, new_path)
+		if status != 'OK':
+			return False
+
+		self._last_list = 0
+		return True
+
+	def _copy_messages(self, uid, path):
+		if isinstance(uid, int):
+			uid = (uid,)
+
+		print 'COPY MESSAGES %s %s' % (str(uid), path)
+		dir = self.get_dir(path)
+		if dir is None:
+			return False
+
+		uid = ','.join(map(str, uid))
+		status, r = self.imap.uid('copy', uid, path)
+		if status != 'OK':
+			print status, r
+			return False
+
+		dir['last_search'] = 0
+		return True
+	
+	def _delete_messages(self, uid, path):
+		if isinstance(uid, int):
+			uid = (uid,)
+
+		print 'DELETE MESSAGES %s %s' % (str(uid), path)
+
+		# Make sure the correct mail directory is selected
+		if self._selected != path:
+			if not self._select_dir(path, True):
+				return False
+		assert self._selected == path
+		dir = self._dirs[path]
+
+		uid = ','.join(map(str, uid))
+		status, r = self.imap.uid('store', uid, '+FLAGS', '\\Deleted')
+		if status != 'OK':
+			print status, r
+			return False
+
+		status, r = self.imap.expunge()
+		if status != 'OK':
+			print status, r
+			return False
+
+		# TODO: instead of reloading list read result of expunge and remove accordingly.
+		dir['last_search'] = 0
+		return True
+
+	def _move_messages(self, uid, old_path, new_path):
+		if not self._copy_messages(uid, new_path):
+			return False
+		return self._delete_messages(uid, old_path)
+			
 	def _fetch_messages(self, uid, macro, forced=False):
 		macros = {'META': ('(FLAGS INTERNALDATE RFC822.SIZE RFC822.HEADER)', self.meta_ctime),
 			'DATA' : ('(RFC822)', self.data_ctime)}
@@ -307,6 +373,36 @@ class ImapFS(Fuse,ImapHelper):
 
 		if not self._delete_dir(path):
 			return -errno.ENOENT
+			
+	def rename(self, oldPath, newPath):
+		oldPath,newPath = oldPath[1:],newPath[1:]
+		# renaming INBOX in imap leaves INBOX but moves the messages inside
+		# exporting this behaviour feels a bit wierd.
+		if oldPath == 'INBOX':
+			return errno.ENOENT
+
+		if not self.get_dir(oldPath) is None:
+			if not self._rename_dir(oldPath, newPath):
+				print "rename_dir failed"
+				return -errno.ENOENT
+		else:
+			old_base,old_uid = padl(oldPath.rsplit('/', 1), 2, '')
+			new_base,new_uid = padl(newPath.rsplit('/', 1), 2, '')
+
+			# Keeping it simple, could be supported with some alias dictionary.
+			if old_uid != new_uid:
+				print "can't change message uid"
+				return -errno.ENOENT
+
+			try:
+				uid = int(old_uid)
+			except ValueError:
+				print "can't convert %s to int" % old_uid
+				return -errno.ENOENT
+
+			if not self._move_messages(uid, old_base, new_base):
+				print "move_messages failed"
+				return -errno.ENOENT
 
 	def readdir(self, path, offset):
 		self._list_dirs()
