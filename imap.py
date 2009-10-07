@@ -101,12 +101,30 @@ class ImapHelper(object):
 			status,dirs = self.imap.list()
 			self._last_list = time.time()
 			dirs = [parse(dir) for dir in dirs]
+			d = {}
 			for (opts, sep, name) in dirs:
 				parts = name.split(sep, 1)
 				path = '/'.join(parts)
 				tmp = self._dirs.get(path, {})
 				tmp.update(dict(zip(('opts', 'sep', 'name'), (opts, sep, parts[-1]))))
-				self._dirs[path] = tmp
+				d[path] = tmp
+			self._dirs = d
+		return True
+
+	def _create_dir(self, path):
+		status,r = self.imap.create(path)
+		if status != 'OK':
+			return False
+
+		self._last_list = 0
+		return True
+	
+	def _delete_dir(self, path):
+		status, r = self.imap.delete(path)
+		if status != 'OK':
+			return False
+
+		self._last_list = 0
 		return True
 
 	def _fetch_messages(self, uid, macro, forced=False):
@@ -164,7 +182,7 @@ class ImapHelper(object):
 					msg.update(d)
 					msg['last_fetch'][macro] = fetch_time
 
-	def _list_messages(self, path, forced=False):
+	def _list_messages(self, path, forced=False, fetch_meta=True):
 		dir = self._dirs[path]
 		if forced or time.time() - self.search_ctime > dir.get('last_search', 0):
 			print 'LISTING MESSAGES IN %s' % path
@@ -177,15 +195,27 @@ class ImapHelper(object):
 
 			# issue search command and fill cache without discarding fetched data
 			status,(msg_uids,) = self.imap.uid('search', 'ALL')
+			if status != 'OK':
+				return False
 			dir['last_search'] = time.time()
-			dir['msg_uids'] = map(int, msg_uids.split(' '))
+
+			if msg_uids == '':
+				dir['msg_uids'] = []
+			else:
+				try:
+					dir['msg_uids'] = map(int, msg_uids.split(' '))
+				except ValueError as e:
+					print "exception when converting (%s) (%s)" % (str(msg_uids), str(e))
+					return False
+
 			for uid in dir['msg_uids']:
 				tmp = self._messages.get(uid, {})
 				tmp['UID'] = uid
 				self._messages[uid] = tmp
 
 			# fetch meta data of all messages now to avoid doing it once for each message later on
-			self._fetch_messages(dir['msg_uids'], 'META')
+			if fetch_meta:
+				self._fetch_messages(dir['msg_uids'], 'META')
 		return True
 
 	def _select_dir(self, path, forced=False):
@@ -256,6 +286,27 @@ class ImapFS(Fuse,ImapHelper):
 				print 'KEYERROR', e, self._messages.keys()
 
 		return -errno.ENOENT
+
+	def mkdir(self, path, mode):
+		path = path[1:]
+		# TODO: append / to path?
+		if not self._create_dir(path):
+			return -errno.ENOENT
+
+	def rmdir(self, path):
+		path = path[1:]
+
+		# make sure the directory is empty.
+		self._list_dirs()
+		if not self._list_messages(path, fetch_meta=False):
+			print "Failed to list messages in %s" % (path, )
+			return -errno.ENOENT
+		dir = self._dirs[path]
+		if len(dir['msg_uids']):
+			return -errno.ENOENT
+
+		if not self._delete_dir(path):
+			return -errno.ENOENT
 
 	def readdir(self, path, offset):
 		self._list_dirs()
