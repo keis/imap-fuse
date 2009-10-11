@@ -160,14 +160,20 @@ class ImapHelper(object):
 		self._last_list = 0
 		return True
 
-	def _copy_messages(self, uid, path):
+	def _copy_messages(self, uid, old_path, path):
 		if isinstance(uid, int):
 			uid = (uid,)
 
 		print 'COPY MESSAGES %s %s' % (str(uid), path)
 		dir = self.get_dir(path)
 		if dir is None:
+			print 'directory %s not found' % path
 			return False
+
+		# Make sure the correct mail directory is selected
+		if not self._select_dir(old_path):
+			return False
+		assert self._selected == old_path
 
 		uid = ','.join(map(str, uid))
 		status, r = self.imap.uid('copy', uid, path)
@@ -185,11 +191,11 @@ class ImapHelper(object):
 		print 'DELETE MESSAGES %s %s' % (str(uid), path)
 
 		# Make sure the correct mail directory is selected
-		if self._selected != path:
-			if not self._select_dir(path, True):
-				return False
+		if not self._select_dir(path):
+			return False
 		assert self._selected == path
-		dir = self._dirs[path]
+
+		dir = self.get_dir(path)
 
 		uid = ','.join(map(str, uid))
 		status, r = self.imap.uid('store', uid, '+FLAGS', '\\Deleted')
@@ -207,7 +213,7 @@ class ImapHelper(object):
 		return True
 
 	def _move_messages(self, uid, old_path, new_path):
-		if not self._copy_messages(uid, new_path):
+		if not self._copy_messages(uid, old_path, new_path):
 			return False
 		return self._delete_messages(uid, old_path)
 			
@@ -254,13 +260,14 @@ class ImapHelper(object):
 			print 'LISTING MESSAGES IN %s' % path
 
 			# Make sure the correct mail directory is selected
-			if self._selected != path:
-				if not self._select_dir(path, True):
+			if not self._select_dir(path):
 					return False
 			assert self._selected == path
 
 			# issue search command and fill cache without discarding fetched data
-			status,(msg_uids,) = self.imap.uid('search', 'ALL')
+			status,r = self.imap.uid('search', 'ALL')
+			print 'SEARCH R', r
+			(msg_uids,) = r
 			if status != 'OK':
 				return False
 			dir['last_search'] = time.time()
@@ -286,7 +293,7 @@ class ImapHelper(object):
 
 	def _select_dir(self, path, forced=False):
 		last_select = self._dirs.get(path, {}).get('last_select', 0)
-		if forced or time.time() - self.select_ctime > last_select:
+		if forced or self._selected != path or time.time() - self.select_ctime > last_select:
 			print 'SELECT %s' % path
 			status,(msgc,) = self.imap.select(path)
 			if status != 'OK':
@@ -399,6 +406,27 @@ class ImapFS(Fuse,ImapHelper):
 				print "move_messages failed"
 				return -errno.ENOENT
 
+	def link(self, targetPath, linkPath):
+		targetPath,linkPath = targetPath[1:],linkPath[1:]
+
+		target_base,target_uid = padl(targetPath.rsplit('/', 1), 2, '')
+		link_base,link_uid = padl(linkPath.rsplit('/', 1), 2, '')
+
+		# Keeping it simple, could be supported with some alias dictionary.
+		if target_uid != link_uid:
+			print "can't change message uid"
+			return -errno.ENOENT
+
+		try:
+			uid = int(target_uid)
+		except ValueError:
+			print "can't convert %s to int" % old_uid
+			return -errno.ENOENT
+
+		if not self._copy_messages(uid, target_base, link_base):
+			print "copy_messages failed"
+			return -errno.ENOENT
+
 	def readdir(self, path, offset):
 		self._list_dirs()
 		path = path[1:]
@@ -440,6 +468,7 @@ class ImapFS(Fuse,ImapHelper):
 		else:
 			buf = ''
 		return buf
+
 
 if __name__ == '__main__':
 	server = ImapFS(version="%prog ")
