@@ -32,8 +32,8 @@ class Stat0(fuse.Stat):
 		self.st_mtime = 0
 		self.st_ctime = 0
 
-def parse(input):
-	assert isinstance(input, basestring), '%s is not a string' % (str(input),)
+def parse_tree(input):
+	assert isinstance(input, basestring), '%s is not a string but %s' % (str(input),type(input))
 	in_quote = False 
 	last_pos = 0
 	stack,out = [],[]
@@ -61,6 +61,25 @@ def parse(input):
 	add(input[last_pos:].replace('"',''))
 	return [x for x in out if x != '']
 		
+# res is sequence of mixed tuples/strings, adds tuple-end-like strings to
+# the previous item under the assumption that the previous was a tuple.
+def fixup(res):
+	out = []
+	for r in res:
+		if isinstance(r, basestring) and r.endswith(')') and not r.startswith('('):
+			out[-1] += (r,)
+		else:
+			out.append(r)
+	return out
+		
+def parse(input):
+	for x in fixup(input):
+		if isinstance(x, tuple):
+			tmp = parse_tree(''.join(x[::2]))
+			yield tmp, x[1::2]
+		else:
+			yield parse_tree(x), []
+
 def padr(l, t, pad=None):
 	return l + [pad]*(t-len(l))
 
@@ -107,9 +126,8 @@ class ImapHelper(object):
 			print 'LISTING DIRECTORIES'
 			status,dirs = self.imap.list()
 			self._last_list = time.time()
-			dirs = [parse(dir) for dir in dirs]
 			d = {}
-			for (opts, sep, name) in dirs:
+			for ((opts, sep, name),extra) in parse(dirs):
 				parts = name.rsplit(sep, 1)
 				path = '/'.join(parts)
 				tmp = self._dirs.get(path, {})
@@ -207,23 +225,6 @@ class ImapHelper(object):
 			last_fetch = get(msg, 'last_fetch', dict([(k,0) for k in macros.keys()]))
 			return time.time() - cache_time > last_fetch[macro]
 
-		# res is sequence of mixed tuples/strings, adds tuple-end-like strings to
-		# the previous item under the assumption that the previous was a tuple.
-		def fixup(res):
-			out = []
-			for r in res:
-				if isinstance(r, basestring) and r.endswith(')') and not r.startswith('('):
-					out[-1] += (r,)
-				else:
-					out.append(r)
-			return out
-				
-		def turkparse(x):
-			if isinstance(x, tuple):
-				tmp = parse(''.join(x[::2]))
-				return tmp, x[1::2]
-			return parse(x), []
-
 		msgs = map(lambda u: get(self._messages, u, {}), uid)
 		if not forced:
 			msgs = filter(refetch, msgs)
@@ -235,8 +236,7 @@ class ImapHelper(object):
 			status,result = self.imap.uid('fetch', uid, req)
 			fetch_time = time.time()
 
-			result = fixup(result)
-			for r,extra in map(turkparse, result):
+			for r,extra in parse(result):
 				for seq,data in zip(r[::2],r[1::2]):
 					d = dict(zip(data[::2],data[1::2]))
 					for k,v in d.items():
